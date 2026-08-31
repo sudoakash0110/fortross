@@ -4,28 +4,34 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install .
-    startCommand: uvicorn fortross.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn fortross.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
     healthCheckPath: /healthz
     envVars:
+      - key: APP_ENV
+        value: production
       - key: PYTHON_VERSION
         value: 3.13.7
       - key: LINKEDIN_LIVE_ENABLED
         value: "false"
       - key: LINKEDIN_PROFILE_ACCESS
-        value: "allowlist"
+        value: "any"
       - key: LINKEDIN_MAX_CONCURRENCY
         value: "1"
       - key: LINKEDIN_MAX_RETRIES
         value: "0"
-      - key: API_KEY
-        sync: false
-      - key: LINKEDIN_LI_AT
-        sync: false
-      - key: LINKEDIN_JSESSIONID
-        sync: false
-      - key: ALLOWED_PROFILE_SLUGS
-        sync: false
-      - key: TURSO_DATABASE_URL
-        sync: false
-      - key: TURSO_AUTH_TOKEN
-        sync: false
+      - key: SAFETY_STATE_FILE
+        value: .state/safety.sqlite3
+      - key: LINKEDIN_MAX_REQUESTS_PER_HOUR
+        value: "10"
+      - key: LINKEDIN_MAX_REQUESTS_PER_DAY
+        value: "20"
+      - key: SESSION_TTL_SECONDS
+        value: "3600"
+      - key: MAX_ACTIVE_SESSIONS
+        value: "20"
+      - key: LOGIN_LIMIT_PER_MINUTE
+        value: "5"
+      - key: LINKEDIN_GLOBAL_MAX_REQUESTS_PER_HOUR
+        value: "60"
+      - key: LINKEDIN_GLOBAL_MAX_REQUESTS_PER_DAY
+        value: "120"

@@ -48,6 +48,7 @@ coverage.xml
 htmlcov/
 
 # Local runtime state and logs.
+.state/
 *.db
 *.db-*
 *.sqlite*

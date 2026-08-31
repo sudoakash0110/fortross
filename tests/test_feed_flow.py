@@ -8,10 +8,11 @@ from fortross.api import get_rate_limiter, get_service, router
 from fortross.linkedin.client import LinkedInClient
 from fortross.safety import MemoryCounterStore, RateLimiter
 from fortross.service import ProfileService
+from fortross.sessions import SessionManager
 from fortross.settings import Settings, get_settings
 
 
-@pytest.mark.parametrize("feed_status,expected", [(200, 200), (403, 503), (429, 503), (503, 502)])
+@pytest.mark.parametrize("feed_status,expected", [(200, 200), (403, 401), (429, 503), (503, 502)])
 async def test_posts_route_bootstrap_and_one_feed_get(feed_status, expected):
     settings = Settings(
         api_key="test-key",
@@ -49,6 +50,11 @@ async def test_posts_route_bootstrap_and_one_feed_get(feed_status, expected):
     )
     app = FastAPI()
     app.include_router(router)
+    manager = SessionManager(settings, MemoryCounterStore())
+    app.state.session_manager = manager
+    token, session = await manager.create("li_at=fake-session; JSESSIONID=ajax:fake")
+    await session.service.client.close()
+    session.service = ProfileService(settings, upstream)
     app.dependency_overrides[get_settings] = lambda: settings
     service = ProfileService(settings, upstream)
     limiter = RateLimiter(settings, MemoryCounterStore())
@@ -60,7 +66,7 @@ async def test_posts_route_bootstrap_and_one_feed_get(feed_status, expected):
         ) as client:
             result = await client.post(
                 "/v1/posts",
-                headers={"X-API-Key": "test-key"},
+                headers={"Authorization": "Bearer " + token},
                 json={"url": "https://www.linkedin.com/in/example/", "limit": 2},
             )
         assert result.status_code == expected
@@ -71,7 +77,7 @@ async def test_posts_route_bootstrap_and_one_feed_get(feed_status, expected):
             assert body["posts"][1]["original_post"]["id"] == "33333"
             assert body["pagination_followed"] is False
     finally:
-        await upstream.close()
+        await manager.close()
 
 
 async def test_bootstrap_budget_blocks_feed_before_network():

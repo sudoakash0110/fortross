@@ -1,7 +1,8 @@
 import asyncio
 import hashlib
+import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import httpx
@@ -28,19 +29,37 @@ SECTION_PATHS = {
 }
 
 
+class UpstreamGate:
+    """One process-wide queue shared by all API sessions."""
+
+    def __init__(self, concurrency: int = 1):
+        self.semaphore = asyncio.Semaphore(concurrency)
+        self.lock = asyncio.Lock()
+        self.last_request = 0.0
+
+
 class UpstreamGovernor:
-    def __init__(self, settings: Settings, store: CounterStore | None = None) -> None:
-        self._semaphore = asyncio.Semaphore(settings.linkedin_max_concurrency)
+    def __init__(
+        self,
+        settings: Settings,
+        store: CounterStore | None = None,
+        gate: UpstreamGate | None = None,
+    ) -> None:
+        self._gate = gate or UpstreamGate(settings.linkedin_max_concurrency)
+        self._semaphore = self._gate.semaphore
         self._interval = settings.linkedin_min_request_interval_seconds
         self._cooldown = settings.linkedin_circuit_breaker_cooldown_seconds
-        self._last_request = 0.0
         self._open_until = 0.0
-        self._lock = asyncio.Lock()
+        self._lock = self._gate.lock
         self._store = store or MemoryCounterStore()
         self._identity = hashlib.sha256(settings.linkedin_li_at.encode()).hexdigest()
         self._limits = (
             (3600, settings.linkedin_max_requests_per_hour),
             (86400, settings.linkedin_max_requests_per_day),
+        )
+        self._global_limits = (
+            (3600, settings.linkedin_global_max_requests_per_hour),
+            (86400, settings.linkedin_global_max_requests_per_day),
         )
 
     def _check_circuit(self) -> None:
@@ -53,10 +72,16 @@ class UpstreamGovernor:
         async with self._semaphore:
             async with self._lock:
                 self._check_circuit()
-                wait = self._interval - (time.monotonic() - self._last_request)
+                wait = self._interval - (time.monotonic() - self._gate.last_request)
                 if wait > 0:
                     await asyncio.sleep(wait)
                 self._check_circuit()
+                try:
+                    blocked_until = await self._store.blocked_until(self._identity)
+                except Exception:
+                    raise LinkedInSafetyError("Circuit-breaker storage is unavailable") from None
+                if blocked_until > time.time():
+                    raise CircuitOpenError("LinkedIn access is paused by the circuit breaker")
                 now = int(time.time())
                 for seconds, limit in self._limits:
                     try:
@@ -67,23 +92,43 @@ class UpstreamGovernor:
                         raise LinkedInSafetyError("Upstream budget storage is unavailable") from exc
                     if count > limit:
                         raise LinkedInSafetyError("Session-wide upstream request budget exhausted")
-                self._last_request = time.monotonic()
+                for seconds, limit in self._global_limits:
+                    try:
+                        count = await self._store.increment(
+                            f"upstream:global:{seconds}", now - now % seconds
+                        )
+                    except Exception:
+                        raise LinkedInSafetyError(
+                            "Global upstream budget storage unavailable"
+                        ) from None
+                    if count > limit:
+                        raise LinkedInSafetyError("Global upstream request budget exhausted")
+                self._gate.last_request = time.monotonic()
             yield
 
-    def trip(self) -> None:
+    async def trip(self) -> None:
         self._open_until = time.monotonic() + self._cooldown
+        try:
+            await self._store.block_until(self._identity, math.ceil(time.time() + self._cooldown))
+        except Exception:
+            # The local circuit stays open even when persistence fails.
+            raise LinkedInSafetyError(
+                "Could not persist the circuit breaker; access paused"
+            ) from None
 
 
 class LinkedInClient:
     def __init__(self, settings: Settings, governor: UpstreamGovernor | None = None) -> None:
         self.settings = settings
         self.governor = governor or UpstreamGovernor(settings)
+        self.active_check: Callable[[], None] | None = None
+        self.authentication_rejected = False
         jsessionid = settings.linkedin_jsessionid.strip().strip('"')
         self._client = httpx.AsyncClient(
             base_url="https://www.linkedin.com",
             timeout=settings.linkedin_request_timeout_seconds,
             follow_redirects=False,
-            cookies={"li_at": settings.linkedin_li_at, "JSESSIONID": settings.linkedin_jsessionid},
+            cookies={"li_at": settings.linkedin_li_at, "JSESSIONID": f'"{jsessionid}"'},
             headers={
                 "accept": "text/html,application/xhtml+xml",
                 "accept-language": "en-US,en;q=0.9",
@@ -94,7 +139,14 @@ class LinkedInClient:
             },
         )
 
+    def clear_credentials(self) -> None:
+        self._client.cookies.clear()
+        self._client.headers.pop("csrf-token", None)
+        self.settings.linkedin_li_at = ""
+        self.settings.linkedin_jsessionid = ""
+
     async def close(self) -> None:
+        self.clear_credentials()
         await self._client.aclose()
 
     async def _get(self, path: str) -> str:
@@ -109,25 +161,29 @@ class LinkedInClient:
 
     async def _get_once(self, path: str, *, accept: str | None = None) -> str:
         try:
+            if self.active_check:
+                self.active_check()
             headers = {"accept": accept} if accept else None
-            async with (
-                self.governor.slot(),
-                self._client.stream("GET", path, headers=headers) as response,
-            ):
-                return await self._read_response(response)
+            async with self.governor.slot():
+                if self.active_check:
+                    self.active_check()
+                async with self._client.stream("GET", path, headers=headers) as response:
+                    return await self._read_response(response)
         except httpx.TransportError as exc:
             raise LinkedInUpstreamError("Could not reach LinkedIn") from exc
 
     async def _read_response(self, response: httpx.Response) -> str:
         location = response.headers.get("location", "")
         if response.status_code in {401, 403}:
-            self.governor.trip()
+            self.authentication_rejected = True
+            await self.governor.trip()
             raise LinkedInAuthError("LinkedIn rejected the configured session")
         if response.status_code in {429, 999}:
-            self.governor.trip()
+            await self.governor.trip()
             raise LinkedInRateLimitError("LinkedIn rate-limited the configured session")
         if any(marker in location.lower() for marker in ("checkpoint", "challenge", "login")):
-            self.governor.trip()
+            self.authentication_rejected = True
+            await self.governor.trip()
             raise LinkedInChallengeError("LinkedIn requested a checkpoint or login")
         if response.status_code == 404:
             raise ProfileNotFoundError("LinkedIn profile or section was not found")
@@ -140,7 +196,8 @@ class LinkedInClient:
         if any(
             marker in str(response.url).lower() for marker in ("checkpoint", "challenge", "login")
         ):
-            self.governor.trip()
+            self.authentication_rejected = True
+            await self.governor.trip()
             raise LinkedInChallengeError("LinkedIn requested a checkpoint or login")
         content_length = response.headers.get("content-length")
         if content_length:
@@ -161,7 +218,8 @@ class LinkedInClient:
         if (not json_response or sample.lstrip().startswith("<")) and any(
             marker in sample for marker in ("/checkpoint/", "authwall", "sign in to linkedin")
         ):
-            self.governor.trip()
+            self.authentication_rejected = True
+            await self.governor.trip()
             raise LinkedInChallengeError("LinkedIn returned a checkpoint or login page")
         return body
 

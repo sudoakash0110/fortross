@@ -154,7 +154,7 @@ async def test_queued_request_rechecks_circuit():
     async with governor.slot():
         task = asyncio.create_task(queued())
         await asyncio.sleep(0)
-        governor.trip()
+        await governor.trip()
     with pytest.raises(CircuitOpenError):
         await task
 

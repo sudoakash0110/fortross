@@ -54,7 +54,6 @@ async def capture(url: str, feed_from: Path | None = None, count: int = 5) -> No
                 settings.linkedin_li_at,
                 settings.linkedin_jsessionid,
                 settings.linkedin_jsessionid.strip('"'),
-                settings.api_key,
             ):
                 if len(secret) >= 8:
                     redacted = redacted.replace(secret, "[REDACTED]")

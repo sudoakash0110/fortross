@@ -50,7 +50,10 @@ class ProfileService:
                 warnings.append(f"Profile {field} is unavailable or could not be parsed reliably")
         for section in ("experience", "education", "skills", "certifications", "languages"):
             if section in documents and not getattr(profile, section):
-                warnings.append(f"LinkedIn exposed {section}, but no items could be parsed")
+                warnings.append(
+                    f"The {section} document was fetched, but no items were recognized; "
+                    "the section may be empty, loaded separately, or unsupported by the parser"
+                )
         return profile, warnings
 
     async def fetch_posts(

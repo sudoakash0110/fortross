@@ -56,3 +56,13 @@ class LinkedInSafetyError(LinkedInError):
 class LinkedInConfigurationError(LinkedInError):
     code = "linkedin_configuration_incomplete"
     status_code = 503
+
+
+class SessionAuthError(LinkedInError):
+    code = "invalid_session"
+    status_code = 401
+
+
+class SessionCapacityError(LinkedInError):
+    code = "session_capacity_reached"
+    status_code = 503

@@ -49,6 +49,7 @@ _UI = {
     "add profile section",
 }
 _EMPLOYMENT = {
+    "permanent",
     "full-time",
     "part-time",
     "self-employed",
@@ -58,6 +59,22 @@ _EMPLOYMENT = {
     "apprenticeship",
     "seasonal",
 }
+_ENTITY_SELECTOR = (
+    '[componentkey^="entity-collection-item-"], [data-component-key^="entity-collection-item-"]'
+)
+_ITEM_SELECTOR = "li, [role=listitem], " + _ENTITY_SELECTOR
+
+
+def _entity_key(tag: Tag) -> bool:
+    return str(tag.get("componentkey", tag.get("data-component-key", ""))).startswith(
+        "entity-collection-item-"
+    )
+
+
+def _entity_parent(item: Tag) -> Tag | None:
+    return next(
+        (parent for parent in item.parents if isinstance(parent, Tag) and _entity_key(parent)), None
+    )
 
 
 def _clean(value: str | None) -> str | None:
@@ -121,6 +138,24 @@ def _date_range(text: str) -> DateRange:
 
 def _section(view: BeautifulSoup, names: tuple[str, ...]) -> Tag | None:
     wanted = {name.casefold() for name in names}
+    # Current SDUI details use a paragraph label, not a semantic heading. Match the
+    # explicit section component rather than scanning every paragraph on the page.
+    section_names = {
+        "experience": "experience",
+        "education": "education",
+        "skills": "skills",
+        "licenses & certifications": "certifications",
+        "licenses and certifications": "certifications",
+        "languages": "languages",
+        "about": "about",
+    }
+    suffixes = tuple(
+        section_names[name] + "detailssection" for name in wanted if name in section_names
+    )
+    for tag in view.select("[componentkey], [data-component-key]"):
+        key = str(tag.get("componentkey", tag.get("data-component-key", ""))).casefold()
+        if key.startswith("com.linkedin.sdui.profile.card.ref") and key.endswith(suffixes):
+            return tag
     for tag in view.select("section[aria-label], [role=region][aria-label]"):
         if str(tag.get("aria-label", "")).casefold() in wanted:
             return tag
@@ -170,9 +205,9 @@ def _items(doc: ProfileDocument, names: tuple[str, ...], detail: bool) -> list[T
             section = view.main
         if section is None:
             continue
-        for tag in section.select("li, [role=listitem]"):
+        for tag in section.select(_ITEM_SELECTOR):
             # Group headers are handled via ancestry, not returned as extra records.
-            if tag.select_one("li, [role=listitem]"):
+            if tag.select_one(_ITEM_SELECTOR):
                 continue
             lines = _lines(tag)
             if not lines or lines[0].casefold() in _FILTERS:
@@ -197,13 +232,23 @@ def _company(
     company = None
     employment = None
     # Prefer the company group outside the nested role list.
-    group = item.find_parent("li") or item.find_parent(attrs={"role": "listitem"})
+    group = (
+        item.find_parent("li")
+        or item.find_parent(attrs={"role": "listitem"})
+        or _entity_parent(item)
+    )
     if group is not None:
         group_lines = _lines(group)
         if group_lines:
             company = _safe(group_lines[0], 200)
             employment = next(
-                (line for line in group_lines if line.casefold() in _EMPLOYMENT), None
+                (
+                    part.strip()
+                    for line in group_lines
+                    for part in line.split("·")
+                    if part.strip().casefold() in _EMPLOYMENT
+                ),
+                None,
             )
         link = _link(group, "/company/") or link
     if company is None and date_index > 1:
@@ -213,6 +258,48 @@ def _company(
             company = _safe(parts[0], 200)
         employment = next((part for part in parts if part.casefold() in _EMPLOYMENT), None)
     return company, str(link["href"]) if link else None, employment
+
+
+def _sdui_experience_location(item: Tag) -> str | None:
+    group = _entity_parent(item)
+    if not _entity_key(item) and group is None:
+        return None
+    # Location follows the date within the role's company link, not in free-form prose.
+    for link in item.find_all("a", href=True):
+        if "/company/" not in str(link["href"]):
+            continue
+        lines = _lines(link)
+        date_index = next((i for i, line in enumerate(lines) if _DATE_RANGE.search(line)), None)
+        if date_index is not None and len(lines) == date_index + 2:
+            return _safe(lines[-1], 150)
+    # Group-level location is shared by its nested roles. The header excludes li content.
+    if group is not None:
+        lines = _lines(group)
+        if len(lines) == 3 and any(
+            part.strip().casefold() in _EMPLOYMENT for part in lines[1].split("·")
+        ):
+            return _safe(lines[2], 150)
+    return None
+
+
+def _sdui_experience_description(item: Tag) -> str | None:
+    paragraphs = []
+    for paragraph in item.find_all("p"):
+        if paragraph.find_parent(["a", "button"]) or paragraph.select_one(
+            'a[href*="skill-associations-details"]'
+        ):
+            continue
+        text = _safe(paragraph.get_text("\n", strip=True), 10000)
+        if (
+            not text
+            or text.casefold() in _UI
+            or text.startswith("Skills:")
+            or "helped me get this job" in text.casefold()
+        ):
+            continue
+        if text not in paragraphs:
+            paragraphs.append(text)
+    return "\n".join(paragraphs) or None
 
 
 def _experiences(doc: ProfileDocument, detail: bool) -> list[Experience]:
@@ -227,12 +314,16 @@ def _experiences(doc: ProfileDocument, detail: bool) -> list[Experience]:
             ".pv-entity__location, .experience-item__location, [data-field=location]"
         )
         location = _safe(location_tag.get_text(" ", strip=True), 150) if location_tag else None
+        location = location or _sdui_experience_location(item)
         # Never classify arbitrary comma-containing prose as a location.
         description_lines = [
             line
             for line in lines[date_index + 1 :]
             if line != location and (len(line) > 80 or line.startswith(("- ", "• ")))
         ]
+        description = "\n".join(description_lines) or None
+        if _entity_key(item) or _entity_parent(item) is not None:
+            description = _sdui_experience_description(item)
         records.append(
             Experience(
                 title=lines[0],
@@ -241,7 +332,7 @@ def _experiences(doc: ProfileDocument, detail: bool) -> list[Experience]:
                 employment_type=employment,
                 date_range=_date_range(lines[date_index]),
                 location=location,
-                description="\n".join(description_lines) or None,
+                description=description,
             )
         )
     return records
@@ -310,6 +401,11 @@ def _languages(doc: ProfileDocument, detail: bool) -> list[Language]:
 
 
 def _name(doc: ProfileDocument) -> str | None:
+    header = _header(doc)
+    if header is not None:
+        heading = header.find(["h1", "h2"])
+        if heading and (value := _safe(heading.get_text(" ", strip=True), 200)):
+            return value
     for view in doc.views:
         heading = view.find("h1")
         if heading and (value := _safe(heading.get_text(" ", strip=True), 200)):
@@ -337,18 +433,79 @@ def _profile_object(doc: ProfileDocument, slug: str, name: str | None) -> dict[s
     return {}
 
 
+def _is_topcard(tag: Tag) -> bool:
+    key = str(tag.get("componentkey", tag.get("data-component-key", ""))).casefold()
+    return (
+        key.endswith(("topcard", "top-card"))
+        or "pv-top-card" in tag.get("class", [])
+        or "profile-topcard" in str(tag.get("data-view-name", "")).casefold()
+    )
+
+
 def _header(doc: ProfileDocument) -> Tag | None:
+    # Require a name heading, not an image/widget whose key merely contains "topcard".
+    # Prefer the complete server-rendered card over fragments reconstructed from Flight.
     for view in doc.views:
-        explicit = view.select_one(
-            ".pv-top-card, [data-view-name*=profile-topcard], [data-component-key*=topcard], "
-            "[data-component-key*=topCard], [data-component-key*=top-card]"
-        )
-        if explicit:
-            return explicit
+        for candidate in view.select(
+            ".pv-top-card, [data-view-name], [componentkey], [data-component-key]"
+        ):
+            if _is_topcard(candidate) and candidate.find(["h1", "h2"]):
+                return candidate
+    for view in doc.views:
         h1 = view.find("h1")
         if h1:
             return h1.parent
     return None
+
+
+def _sdui_header_values(header: Tag, name: str | None) -> tuple[str | None, str | None]:
+    """Read the identity/contact block by structure, without hashed CSS class names."""
+    if not _is_topcard(header):
+        return None, None
+    heading = next(
+        (h for h in header.find_all(["h1", "h2"]) if h.get_text(" ", strip=True) == name), None
+    )
+    contact = header.select_one('a[href*="/overlay/contact-info/"]')
+    if heading is None or contact is None:
+        return None, None
+    headline = location = None
+    # The contact row has a location paragraph, a separator, and the contact link.
+    for row in contact.parents:
+        if row is header or row.find(["h1", "h2"]) is not None:
+            break
+        candidates = []
+        for child in row.find_all(["p", "span"], recursive=False):
+            if child is contact or contact in child.descendants or child.find("a"):
+                continue
+            value = _safe(child.get_text(" ", strip=True), 200)
+            if value and value not in {"·", "•", "|"} and value.casefold() not in _UI:
+                candidates.append(value)
+        if len(candidates) == 1:
+            location = candidates[0]
+            break
+    # The first paragraph after the name/pronouns wrapper is the headline. Require
+    # the same block to contain contact info so pronouns/connection badges aren't used.
+    for block in heading.parents:
+        if block is header:
+            break
+        if contact not in block.descendants:
+            continue
+        for child in block.find_all("p", recursive=False):
+            previous = child.find_previous_sibling()
+            if previous is not None and (previous is heading or heading in previous.descendants):
+                headline = _safe(child.get_text(" ", strip=True))
+                if headline:
+                    # When the headline is absent, the organization summary can occupy
+                    # the same slot. Its names repeat in the card's company/school block.
+                    other_labels = {
+                        p.get_text(" ", strip=True) for p in header.find_all("p") if p is not child
+                    }
+                    parts = [part.strip() for part in headline.split("·")]
+                    if all(part in other_labels for part in parts):
+                        headline = None
+                break
+        break
+    return headline, location
 
 
 def _header_values(header: Tag | None, name: str | None) -> tuple[str | None, str | None]:
@@ -377,7 +534,8 @@ def _header_values(header: Tag | None, name: str | None) -> tuple[str | None, st
         if siblings:
             headline_text = headline_text or siblings[0]
         # Location must be explicit; generic sibling text is not reliable geography.
-    return headline_text, location_text
+    sdui_headline, sdui_location = _sdui_header_values(header, name)
+    return headline_text or sdui_headline, location_text or sdui_location
 
 
 def parse_profile_documents(
@@ -419,7 +577,17 @@ def parse_profile_documents(
         image_urls.append(picture)
     images = ProfileImages(
         profile=next((url for url in image_urls if "profile-displayphoto" in url), None),
-        background=next((url for url in image_urls if "profile-background" in url), None),
+        background=next(
+            (
+                url
+                for url in image_urls
+                if any(
+                    marker in url
+                    for marker in ("profile-background", "profile-displaybackgroundimage")
+                )
+            ),
+            None,
+        ),
     )
     parsers = {
         "experience": _experiences,

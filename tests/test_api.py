@@ -13,14 +13,14 @@ def test_health_is_public_and_reports_live_state() -> None:
     assert response.json() == {"status": "ok", "live_linkedin_enabled": False}
 
 
-def test_profile_endpoint_requires_api_key() -> None:
+def test_profile_endpoint_requires_session_token() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/v1/profiles",
             json={"url": "https://www.linkedin.com/in/example/"},
         )
     assert response.status_code == 401
-    assert response.json()["detail"]["code"] == "invalid_api_key"
+    assert response.json()["detail"]["code"] == "invalid_session"
 
 
 @pytest.fixture
@@ -51,6 +51,13 @@ def authenticated_api(monkeypatch):
     app.dependency_overrides[get_service] = lambda: Service()
     try:
         with TestClient(app) as client:
+            login = client.post(
+                "/login-with-cookie",
+                headers={"X-API-Key": "test-api-key"},
+                data={"cookie": "li_at=synthetic; JSESSIONID=ajax:test"},
+            )
+            assert login.status_code == 200
+            client.session_token = "Bearer " + login.json()["access_token"]
             yield client, calls
     finally:
         app.dependency_overrides.clear()
@@ -60,7 +67,7 @@ def test_posts_api_contract(authenticated_api):
     client, calls = authenticated_api
     result = client.post(
         "/v1/posts",
-        headers={"X-API-Key": "test-api-key"},
+        headers={"Authorization": client.session_token},
         json={
             "url": "https://www.linkedin.com/in/example/",
             "limit": 5,
@@ -79,7 +86,7 @@ def test_posts_rejects_invalid_limit(authenticated_api, limit):
     client, calls = authenticated_api
     result = client.post(
         "/v1/posts",
-        headers={"X-API-Key": "test-api-key"},
+        headers={"Authorization": client.session_token},
         json={
             "url": "https://www.linkedin.com/in/example/",
             "limit": limit,
@@ -93,7 +100,7 @@ def test_posts_rejects_other_websites(authenticated_api):
     client, calls = authenticated_api
     result = client.post(
         "/v1/posts",
-        headers={"X-API-Key": "test-api-key"},
+        headers={"Authorization": client.session_token},
         json={
             "url": "https://example.com/in/example/",
         },
@@ -113,7 +120,7 @@ def test_profile_base_only_option(authenticated_api):
     client, calls = authenticated_api
     result = client.post(
         "/v1/profiles",
-        headers={"X-API-Key": "test-api-key"},
+        headers={"Authorization": client.session_token},
         json={
             "url": "https://www.linkedin.com/in/example/",
             "include_sections": False,
