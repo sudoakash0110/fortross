@@ -69,12 +69,18 @@ class LinkedInProfile(BaseModel):
 
 
 class ProfileRequest(BaseModel):
-    url: HttpUrl
+    url: HttpUrl = Field(
+        examples=["https://www.linkedin.com/in/example/"],
+        description="LinkedIn profile URL. Replace example with the target profile's slug.",
+    )
     include_sections: bool = True
 
 
 class PostsRequest(BaseModel):
-    url: HttpUrl
+    url: HttpUrl = Field(
+        examples=["https://www.linkedin.com/in/example/"],
+        description="LinkedIn profile URL. Replace example with the target profile's slug.",
+    )
     limit: int = Field(default=50, ge=1, le=50)
 
 

@@ -13,6 +13,17 @@ def test_health_is_public_and_reports_live_state() -> None:
     assert response.json() == {"status": "ok", "live_linkedin_enabled": False}
 
 
+@pytest.mark.parametrize("model", ["ProfileRequest", "PostsRequest"])
+def test_playground_request_examples_use_linkedin_profile_urls(model):
+    with TestClient(app) as client:
+        schema = client.get("/openapi.json").json()
+    request_schema = schema["components"]["schemas"][model]
+    assert request_schema["properties"]["url"]["examples"] == [
+        "https://www.linkedin.com/in/example/"
+    ]
+    assert "url" in request_schema["required"]
+
+
 def test_profile_endpoint_requires_session_token() -> None:
     with TestClient(app) as client:
         response = client.post(
