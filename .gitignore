@@ -1,0 +1,67 @@
+# Local credentials. Only the placeholder environment template belongs in Git.
+.env
+.env.*
+!.env.example
+.cookie
+.cookie.*
+*.cookie
+*.cookies
+cookies*.txt
+cookies*.json
+.secrets/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS/editor files and backup copies, which may contain old credentials.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+.python-version
+
+# Python environments, build output, and tool caches.
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local runtime state and logs.
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.log.*
+logs/
+*.pid
+
+# Authenticated captures must stay here, not alongside synthetic test fixtures.
+*.har
+*.har.*
+captures/
+responses/
+response*.json
+response*.html
+/body.json
+/body.html
