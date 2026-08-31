@@ -1,126 +1,82 @@
 # Fortross LinkedIn Profile API
 
-Browserless FastAPI service for the Ontross engineering challenge. Each caller supplies
-their own LinkedIn session cookie, receives a temporary bearer token, and requests
-structured profile data or first-page posts. No operator account or shared API key is needed.
+**[Open the live playground](https://fortross-api.onrender.com/playground)**
 
-## Status
+## Try it
 
-Tested responses support profile name, headline, location, images, experience, and posts
-including reposts. **About, education, skills, certifications, and languages are not yet
-fully verified against current LinkedIn responses.** Missing fields return null/empty
-values with warnings, not a guarantee that the source profile has no such data.
-Hosted extraction is not yet verified. This is an incomplete assignment demo, not a
-production enrichment service.
+You need your own signed-in LinkedIn session's Cookie header value. This grants access
+to your session, so only submit it to a server you trust. Cookies stay in server memory;
+this is not LinkedIn OAuth, and automated access can put your account at risk.
 
-## Run locally
+To find it in Chrome, open your LinkedIn profile, open **DevTools → Network**, and reload
+the page. Select the profile document request, then **Headers → Request Headers → Cookie**.
+Copy the full Cookie value, not the response's Set-Cookie header.
 
-Use Python 3.12 or 3.13 and an activated virtual environment:
+<img src="docs/images/linkedin-cookie-redacted.png" alt="Redacted Chrome DevTools illustration showing Network, Headers, and the Cookie request header" width="640">
 
-```bash
-pip install -e '.[dev]'
-cp .env.example .env  # Only if you do not already have .env.
-python -m fortross.check
-python -m uvicorn fortross.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
-```
+*Illustration with private request names, profile path, and cookie value redacted.*
 
-Open `http://127.0.0.1:8000/playground`. The template starts with live requests disabled;
-set `LINKEDIN_LIVE_ENABLED=true` and restart when ready to request LinkedIn data.
-Login and logout work with live mode off. Never put cookies or tokens in `.env`.
-
-## Playground flow
-
-1. Open `POST /login-with-cookie`, click **Try it out**, and paste your full Cookie header
-   value into the `cookie` form field. Keep embedded quotes unchanged. It is not JSON.
+1. Open **POST /login-with-cookie**, click **Try it out**, and paste the full Cookie value
+   into the `cookie` form field. Keep quotes unchanged; no JSON escaping is needed.
 2. Copy `access_token`. Click **Authorize**, paste the raw token into **SessionToken**
-   without a `Bearer` prefix, and authorize.
-3. Try `/profiles` with `include_sections:false`, or `/posts` with `limit:5`.
-4. Execute `POST /logout`. Reusing the revoked token returns 401. The Authorize dialog's
-   Logout button alone only forgets the token in the UI; it does not revoke it server-side.
+   without adding `Bearer`, and authorize.
+3. Execute **POST /profiles** or **POST /posts** with one of the payloads below.
+   Replace `example` with the target profile's slug.
+4. Execute **POST /logout** when done. Further use of that token returns 401.
+   The Authorize dialog's Logout button alone does not revoke the server session.
 
-Login only parses the cookie; `linkedin_session_verified:false` means no LinkedIn request
-has verified it. Cookies are session credentials: only submit your own to a server you trust.
-This is not LinkedIn OAuth, and automation can result in account restrictions.
-Keep cookies, tokens, and private data out of recordings and screenshots.
+**Profile:**
 
-## API
-
-| Method / path | Input | Authentication |
-| --- | --- | --- |
-| `GET /healthz` | None; no LinkedIn request | Public |
-| `POST /login-with-cookie` | Form field `cookie` | Public, rate-limited |
-| `POST /profiles` | JSON: `url`, `include_sections` (default true) | Bearer token |
-| `POST /posts` | JSON: `url`, `limit` (1–50, default 50) | Bearer token |
-| `POST /logout` | No body | Bearer token |
-
-Interactive schemas and responses: `/playground`; OpenAPI: `/openapi.json`.
-`/docs` redirects to the playground. Legacy `/v1/profiles` and `/v1/posts` aliases remain.
-
-```http
-POST /profiles
-Authorization: Bearer <token>
-Content-Type: application/json
-
+```json
 {"url":"https://www.linkedin.com/in/example/","include_sections":false}
 ```
 
-```http
-POST /posts
-Authorization: Bearer <token>
-Content-Type: application/json
+Use `include_sections:true` to request detail sections too. This costs up to six LinkedIn
+GETs instead of one, and unsupported sections can still be empty.
 
+**First-page posts:**
+
+```json
 {"url":"https://www.linkedin.com/in/example/","limit":5}
 ```
 
-Profiles return `request_id`, `source`, `profile`, and `warnings`. Sections and images are
-included when recognized. Posts include text, author, media, links, and repost metadata;
-`original_post` is separate from the reposter's optional commentary. Posts are first-page
-only: no pagination or 30-day filter, and no invented timestamps from relative date labels.
+The playground documents request/response schemas. The maximum post limit is 50;
+results can contain fewer items. For other clients, send `Authorization: Bearer <token>`
+on `/profiles`, `/posts`, and `/logout`.
 
-Common failures: 400 invalid cookie; 401 invalid/expired/revoked token; 403 disallowed
-profile; 429 API/login limit; 503 live disabled or safety stop; 502 upstream/parsing failure.
-Inspect the response's `detail.code`. Stop on limits/checkpoints; do not retry in a loop.
+## Before testing
 
-## Approach
+- Login parses the cookie without contacting LinkedIn. `linkedin_session_verified:false`
+  is expected; validity is checked when extraction is attempted.
+- Tokens expire after one hour by default, or on server restart. Log in again if needed.
+- Requests are deliberately rate-limited. Stop on a limit or checkpoint; do not repeatedly retry.
+- The free host may take about a minute to wake after idle time. Never share cookies or
+  tokens in screenshots, recordings, or issues.
 
-The service uses `httpx` to request LinkedIn profile/detail documents directly over HTTPS.
-The parser handles conventional HTML and the SDUI `__como_rehydration__` bootstrap,
-decoding a limited subset of React Flight rows and references without executing JavaScript.
-Structural section/card markers identify fields and grouped experience roles.
+## Run locally
 
-For Voyager activity pages, it reads the requested profile's URN from the document's
-bootstrap, then makes one `/voyager/api/graphql` feed GET with `start:0` and a versioned
-query ID. Ordered feed references are resolved separately from embedded repost originals.
-There is no browser runtime, pagination, automatic endpoint probing, or production retry.
-Transport, parsing, session handling, and safety controls are separate modules.
-
-## Safety and limitations
-
-- Cookies and token hashes stay in process memory. Tokens expire after one hour by default;
-  logout revokes them, and a server restart invalidates every session. Use one worker/instance.
-- LinkedIn authentication rejection/checkpoints revoke sessions sharing that cookie.
-  Expiry at LinkedIn is discovered on a request, not by background polling.
-- API calls and actual LinkedIn GETs have separate limits, shared across tokens using the
-  same credential. Global upstream budgets, pacing, and cooldowns also apply. A header-only
-  profile costs one GET; a full profile up to six; posts up to two.
-- SQLite stores only safety counters/cooldowns, never cookies, tokens, or profile data.
-  Render Free can lose this file on restart/redeploy/spin-down. Do not restart to bypass limits.
-- Normal API logs exclude credentials and profile content. Diagnostic tools can save private
-  responses under ignored `responses/`; never commit these or run diagnostics in production.
-- Missing sections may be lazy-loaded or unsupported. Endpoints, markup, and query IDs can
-  change. Video/document downloads are unsupported, and posts may return fewer than the limit.
-- Memory-only credentials still require trust in the server/host. Hosted IPs may receive
-  different responses or checkpoints; passing offline tests does not prove hosted extraction.
-
-## Checks and deployment
+Use Python 3.12 or 3.13 with an activated virtual environment, from the repository root:
 
 ```bash
-pytest
-ruff check .
-python scripts/check_secrets.py
-python -m build
+pip install -e '.[dev]'
+cp .env.example .env  # Skip if .env already exists.
+python -m uvicorn fortross.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-Tests use synthetic fixtures and block network access. The secret scan checks Git-visible
-working files, not full Git history. Keep `.env`, cookies, captures, and local state ignored.
-See [DEPLOYMENT.md](DEPLOYMENT.md) for Render Free setup and environment variables.
+Set `LINKEDIN_LIVE_ENABLED=true` in `.env` before starting if you want live extraction.
+Leave it false for login/logout-only tests. Do not add LinkedIn credentials to `.env`.
+The local playground is at `http://127.0.0.1:8000/playground`.
+
+## Approach and limitations
+
+Direct HTTPS requests fetch LinkedIn profile/detail documents and the initial posts feed.
+The parser decodes HTML/SDUI data and Voyager feed references into structured JSON,
+including grouped experience and reposts. No browser runs in the backend.
+
+The hosted service has passed a maintainer smoke test. About, education, skills,
+certifications, and languages remain incompletely verified; null/empty fields and warnings
+do not prove the source profile has no data. Posts are first-page-only, with no 30-day
+filter or guaranteed exact timestamps. LinkedIn changes can break extraction.
+
+SQLite stores safety counters only, not credentials or results. Free-host restarts can
+erase those counters; sessions are memory-only and are also lost on restart.
